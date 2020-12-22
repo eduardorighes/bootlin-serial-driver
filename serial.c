@@ -9,10 +9,21 @@
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 
+enum {
+	SERIAL_RESET_COUNTER,
+	SERIAL_GET_COUNTER,
+} SerialCmd;
+
 struct serial_dev {
 	struct miscdevice miscdev;
 	void __iomem *regs;
+	unsigned int counter; /*TODO: this should be 64-bit */
 };
+
+static struct serial_dev *file_to_serial(struct file *filp)
+{
+	return container_of(filp->private_data, struct serial_dev, miscdev);
+}
 
 static u32 reg_read(struct serial_dev *dev, off_t offset)
 {
@@ -65,6 +76,7 @@ static ssize_t serial_read(
 	size_t bufsize, 
 	loff_t *ppos)
 {
+	
 	return -EINVAL;
 }
 
@@ -74,12 +86,46 @@ static ssize_t serial_write(
 	size_t bufsize, 
 	loff_t *ppos)
 {
-	return -EINVAL;
+	struct serial_dev *dev = file_to_serial(filp);
+	size_t i;
+	u8 c;
+
+	for (i = 0; i < bufsize; ++i) {
+		if (get_user(c, buf + i))
+			return -EFAULT;
+		serial_write_char(dev, c);
+		++dev->counter;
+		if (c == '\n') 
+			serial_write_char(dev, '\r');
+	}
+
+	return bufsize;
+}
+
+static long serial_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	struct serial_dev *dev = file_to_serial(filp);
+	unsigned int __user *argp = (unsigned int __user *) arg;
+
+	switch (cmd) {
+		case SERIAL_RESET_COUNTER:
+			dev->counter = 0;
+		break;
+		case SERIAL_GET_COUNTER:
+			if (put_user(dev->counter, argp))
+				return -EFAULT;
+		break;
+		default:
+			return -ENOTTY;
+	}
+	return 0;
 }
 
 static const struct file_operations serial_fops = {
+	.owner = THIS_MODULE,
 	.read = serial_read,
 	.write = serial_write,
+	.unlocked_ioctl = serial_ioctl,
 };
 
 static int serial_probe(struct platform_device *pdev)
