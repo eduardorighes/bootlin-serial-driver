@@ -8,16 +8,26 @@
 #include <linux/io.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
+#include <linux/interrupt.h>
+#include <linux/wait.h>
 
 enum {
 	SERIAL_RESET_COUNTER,
 	SERIAL_GET_COUNTER,
 } SerialCmd;
 
+#define SERIAL_BUFSIZE 64
+
 struct serial_dev {
+	struct platform_device *pdev;
 	struct miscdevice miscdev;
 	void __iomem *regs;
 	unsigned int counter; /*TODO: this should be 64-bit */
+	int irq;
+	char buffer[SERIAL_BUFSIZE];
+	int buf_rd;
+	int buf_wr;
+	wait_queue_head_t serial_wait;
 };
 
 static struct serial_dev *file_to_serial(struct file *filp)
@@ -76,8 +86,22 @@ static ssize_t serial_read(
 	size_t bufsize, 
 	loff_t *ppos)
 {
+	int ret;
+	struct serial_dev *dev = file_to_serial(filp);
+	char ch;
+
+	ret = wait_event_interruptible(dev->serial_wait, dev->buf_wr != dev->buf_rd);
+	if (ret)
+		return ret;
+
+	ch = dev->buffer[dev->buf_rd];
+	dev->buf_rd = (dev->buf_rd + 1) % SERIAL_BUFSIZE;
 	
-	return -EINVAL;
+	if (put_user(ch, buf))
+		return -EFAULT;
+	*ppos += 1;
+
+	return 1;
 }
 
 static ssize_t serial_write(
@@ -99,6 +123,8 @@ static ssize_t serial_write(
 			serial_write_char(dev, '\r');
 	}
 
+	*ppos += bufsize;
+
 	return bufsize;
 }
 
@@ -119,6 +145,18 @@ static long serial_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -ENOTTY;
 	}
 	return 0;
+}
+
+static irqreturn_t serial_interrupt(int irq, void *dev_id)
+{
+	struct serial_dev *dev = (struct serial_dev *) dev_id;
+
+	dev->buffer[dev->buf_wr] = reg_read(dev, UART_RX) & 0xff;
+	dev->buf_wr = (dev->buf_wr + 1) % SERIAL_BUFSIZE;
+
+	wake_up(&dev->serial_wait);
+
+	return IRQ_HANDLED;
 }
 
 static const struct file_operations serial_fops = {
@@ -148,7 +186,10 @@ static int serial_probe(struct platform_device *pdev)
 	if (!dev)
 		return -ENOMEM;
 	
+	dev->pdev = pdev;
 	platform_set_drvdata(pdev, dev);
+
+	init_waitqueue_head(&dev->serial_wait);
 
 	dev->regs = devm_ioremap_resource(&pdev->dev, res);
 	if (!dev->regs) {
@@ -173,6 +214,17 @@ static int serial_probe(struct platform_device *pdev)
 	reg_write(dev, UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT, UART_FCR);
 	reg_write(dev, 0x00, UART_OMAP_MDR1);
 
+	/* interrupt handler */
+
+	dev->irq = platform_get_irq(pdev, 0);
+	ret =devm_request_irq(&pdev->dev, dev->irq, serial_interrupt, 0, 
+		              "serial", dev);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "failed to register interrupt handler (%d)\n", ret);
+		return ret;
+	}
+
+	reg_write(dev, UART_IER_RDI, UART_IER);
 
 	/* register with misc subsystem */
 
