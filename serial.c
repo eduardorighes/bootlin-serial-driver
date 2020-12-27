@@ -12,6 +12,7 @@
 #include <linux/spinlock.h>
 #include <linux/sched.h>
 #include <uapi/linux/serial_reg.h>
+#include <linux/debugfs.h>
 
 #define SERIAL_RESET_COUNTER  0
 #define SERIAL_GET_TX_COUNTER 1
@@ -31,6 +32,7 @@ struct serial_dev {
 	int buf_wr;
 	wait_queue_head_t serial_wait;
 	spinlock_t lock;
+	struct dentry *debugfs_dir;
 };
 
 static struct serial_dev *file_to_serial(struct file *filp)
@@ -224,6 +226,7 @@ static int serial_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
+
 	/* enable device */
 
 	pm_runtime_enable(&pdev->dev);
@@ -263,6 +266,12 @@ static int serial_probe(struct platform_device *pdev)
 
 	misc_register(&dev->miscdev);
 
+	/* debugfs */
+
+	dev->debugfs_dir = debugfs_create_dir(dev->miscdev.name, NULL);
+	debugfs_create_u32("tx_counter", S_IRUGO, dev->debugfs_dir, &dev->tx_counter);
+	debugfs_create_u32("rx_counter", S_IRUGO, dev->debugfs_dir, &dev->rx_counter);
+
 	dev_info(&pdev->dev, "probe complete\n");
 
 	return 0;
@@ -272,6 +281,7 @@ static int serial_remove(struct platform_device *pdev)
 {
 	struct serial_dev *dev = platform_get_drvdata(pdev);
 
+	debugfs_remove(dev->debugfs_dir);
 	misc_deregister(&dev->miscdev);
 	pm_runtime_disable(&pdev->dev);
 
